@@ -1,6 +1,6 @@
 from datetime import date, time, timedelta
 
-from pawpal_system import Pet, Priority, Schedule, Scheduler, ScheduledTask, Status, Task
+from pawpal_system import Owner, Pet, Priority, Schedule, Scheduler, ScheduledTask, Status, Task, Worker
 
 
 
@@ -88,4 +88,51 @@ def test_schedule_find_conflicts_detects_overlap():
     assert conflicts == [(walk, breakfast)]
     assert schedule.has_conflict()
 
+
+def test_add_task_stamps_pet_species():
+    # A task's pet_species is denormalized from its pet at add time, so a
+    # Worker can be matched against it without a separate pet lookup.
+    pet = Pet("Rex", "dog")
+    task = Task("Morning walk", 30, Priority.HIGH, category="walking")
+
+    pet.add_task(task)
+
+    assert task.pet_species == "dog"
+
+
+def test_edit_pet_restamps_species_on_existing_tasks():
+    # Changing a pet's species must update the denormalized pet_species on
+    # every task it already has, or those tasks would keep matching
+    # workers against the pet's old species.
+    owner = Owner("Jordan", "Smith")
+    pet = Pet("Whiskers", "cat")
+    owner.add_pet(pet)
+    task = Task("Grooming", 20, Priority.MEDIUM, category="grooming")
+    pet.add_task(task)
+    assert task.pet_species == "cat"
+
+    owner.edit_pet(pet.pet_id, "Whiskers", "other", age=3)
+
+    assert task.pet_species == "other"
+
+
+def test_worker_qualification_checks_skill_and_pet_type_separately():
+    # A dog-walking generalist-on-skills worker who only handles cats
+    # should fail the pet-type check but pass the skill check, and the
+    # reverse should hold for a dog-only, non-walking worker.
+    dog_task = Task("Morning walk", 30, Priority.HIGH, category="walking")
+    dog_task.pet_species = "dog"
+
+    cat_sitter = Worker("Robin", skills=[], pet_types=["cat"])
+    assert cat_sitter.is_skilled_for(dog_task)  # generalist on skills
+    assert not cat_sitter.is_suited_for(dog_task)  # wrong species
+    assert not cat_sitter.is_qualified_for(dog_task)
+
+    groomer = Worker("Sam", skills=["grooming"], pet_types=["dog"])
+    assert not groomer.is_skilled_for(dog_task)  # wrong category
+    assert groomer.is_suited_for(dog_task)  # right species
+    assert not groomer.is_qualified_for(dog_task)
+
+    dog_walker = Worker("Alex", skills=["walking"], pet_types=["dog"])
+    assert dog_walker.is_qualified_for(dog_task)
 

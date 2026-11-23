@@ -1,15 +1,20 @@
 flowchart TD
+    STORE[("business_data.json: saved customers, pets, tasks, employees")]
+
     subgraph INPUT["Input"]
-        CLIENT["Customer and pet data: tasks with duration, priority, category"]
-        STAFF["Employee roster: skills, hours, daily capacity"]
+        CLIENT["Customer and pet data: tasks with duration, priority, category, pet species"]
+        STAFF["Employee roster: skills, pet types, hours, daily capacity"]
     end
+
+    STORE --> CLIENT
+    STORE --> STAFF
 
     CLIENT --> SCHED["Scheduler (deterministic): decides which tasks are due today and when"]
     SCHED --> POOL["Day's scheduled tasks: time-slotted, not yet assigned to anyone"]
 
     subgraph AGENT["Dispatcher Agent"]
         PLAN["Planner (LLM): proposes task-to-worker assignments"]
-        CHECK["Evaluator (deterministic): checks skill match, hours, overlaps, capacity"]
+        CHECK["Evaluator (deterministic): checks skill match, pet-type match, hours, overlaps, capacity"]
         RETRY{"Valid?"}
         FALLBACK["Fallback rule: deterministic greedy assignment"]
     end
@@ -34,6 +39,7 @@ flowchart TD
     end
 
     UI --> REVIEW --> ACT
+    UI -.saved after any change.-> STORE
 
     subgraph TEST["Automated testing"]
         MOCK["tests/test_dispatcher.py: mocked LLM, deliberately invalid plans"]

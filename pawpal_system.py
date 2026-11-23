@@ -84,6 +84,11 @@ class Task:
     # an id keeps the link between a task and its pet stable. Set by
     # Pet.add_task().
     pet_id: str = ""
+    # ADDED (pet-type matching): the pet's species, denormalized onto the
+    # task (same reasoning as pet_id) so a Worker can be matched against it
+    # without the dispatcher needing a separate pet lookup. Set by
+    # Pet.add_task()/edit_task(), same as pet_id.
+    pet_species: str = ""
     # CHANGE: bool `completed` -> last_completed date. A bool can't reset for
     # a new day, and frequency has nothing to act on without knowing when the
     # task was last done.
@@ -149,6 +154,9 @@ class Pet:
         # Stamp the task with this pet's id so the link from task to pet is
         # always set, no matter who created the Task.
         task.pet_id = self.pet_id
+        # ADDED (pet-type matching): also stamp the pet's species, so a
+        # Worker's pet_types can be checked without a separate lookup.
+        task.pet_species = self.species
         # Then store it in this pet's task list.
         self.tasks.append(task)
 
@@ -163,6 +171,7 @@ class Pet:
                 task.task_id = existing.task_id
                 # Make sure the replacement is linked to this pet too.
                 task.pet_id = self.pet_id
+                task.pet_species = self.species
                 # Swap the old task for the new one at the same position.
                 self.tasks[i] = task
                 return
@@ -413,6 +422,12 @@ class Owner:
             if pet.pet_id == pet_id:
                 pet.name = name
                 pet.species = species
+                # ADDED (pet-type matching): re-stamp every existing task's
+                # denormalized pet_species too, or a pet's already-created
+                # tasks would keep matching workers against its OLD species
+                # after this edit.
+                for task in pet.tasks:
+                    task.pet_species = species
                 # Only change the age if one was given; None means "keep it".
                 if age is not None:
                     pet.age = age
@@ -592,14 +607,31 @@ class Worker:
     # Empty list means "generalist": qualified for every category, so a
     # one-person business can add a worker without configuring skills.
     skills: list[str] = field(default_factory=list)
+    # ADDED (pet-type matching): which pet species this worker can handle
+    # (e.g. "dog", "cat"). Empty list means "any pet", same generalist
+    # convention as skills.
+    pet_types: list[str] = field(default_factory=list)
     available_start: time = time(8, 0)
     available_end: time = time(18, 0)
     max_minutes_per_day: int = 480
     worker_id: str = field(default_factory=_new_id)
 
-    def is_qualified_for(self, task: Task) -> bool:
-        """Return True if this worker can perform `task`'s category."""
+    # ADDED (pet-type matching): split out of is_qualified_for() so a
+    # caller (the dispatcher's Evaluator) can tell which specific thing
+    # failed - a skill mismatch and a pet-type mismatch are different
+    # problems, and the AI retry loop needs a distinct message for each to
+    # have any real chance of fixing the one that's actually wrong.
+    def is_skilled_for(self, task: Task) -> bool:
+        """Return True if this worker's skills cover `task`'s category."""
         return not self.skills or task.category in self.skills
+
+    def is_suited_for(self, task: Task) -> bool:
+        """Return True if this worker handles `task`'s pet species."""
+        return not self.pet_types or task.pet_species in self.pet_types
+
+    def is_qualified_for(self, task: Task) -> bool:
+        """Return True if this worker can perform `task` for its pet."""
+        return self.is_skilled_for(task) and self.is_suited_for(task)
 
     def is_available_for(self, start: time, end: time) -> bool:
         """Return True if the [start, end) window falls inside this worker's hours."""

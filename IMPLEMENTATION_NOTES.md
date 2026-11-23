@@ -274,3 +274,230 @@ with a real Gemini API key has not been tested, since that would require
 the user's own key.
 
 ---
+
+## Step 6 — JSON persistence (`storage.py`)
+
+**What it does:** customers (with their pets and tasks) and employees
+used to live only in Streamlit's `session_state`, so they vanished on a
+server restart or a new browser session. `storage.py` adds
+`save_business()`/`load_business()`, converting a `Business` to/from a
+plain JSON file (`business_data.json`) - enums as `.name` strings, `time`
+as `"HH:MM"`, `date` as ISO strings. `save_business()` writes to a
+`.tmp` file and `os.replace()`s it into place, so a crash mid-write can't
+leave behind a half-written file `load_business()` can't parse.
+
+**Scope:** only the roster persists - customers, pets, tasks, employees.
+A day's generated `Schedule`/dispatch result does not, since it's cheap
+to rebuild from the roster plus the `Scheduler`/`Dispatcher` and isn't
+really "data someone typed in."
+
+**Wiring in `app.py`:** on first session init, `load_business()` is tried;
+`FileNotFoundError`/`ValueError`/`KeyError` (missing file, corrupted file,
+or an old/incompatible format) falls back to a freshly seeded `Business`
+instead of crashing. `save_business()` is called once, unconditionally,
+as the very last line of the script - since Streamlit re-runs the whole
+file on every interaction, this keeps the file continuously in sync with
+`session_state` without a separate "Save" button or per-action save calls
+scattered through the file.
+
+**Verification:** round-tripped with Streamlit's `AppTest` tool (add a
+customer and a worker in one simulated session, inspect the written
+JSON, then load it in a second, brand-new `AppTest` instance and confirm
+both come back correctly) and confirmed a corrupted file falls back to
+the default seed instead of crashing. All 14 tests still pass.
+
+---
+
+## Fixes found after the fact
+
+### Fix: adding a second customer looked like it did nothing
+
+**Symptom:** reported by the user - after clicking "Add customer," the
+page still showed the first customer's pets/tasks, making it look like
+only one customer could ever be added.
+
+**Cause:** the "Add customer" button handler called `business.add_client
+(...)` and `st.rerun()` but never updated `st.session_state.
+active_client_id`. The "Active customer" selectbox always restores
+whichever id was last active, so it kept showing the first customer - the
+new one *was* added correctly underneath, it just never became visible.
+
+**Fix:** the handler now also sets `st.session_state.active_client_id =
+new_client.client_id` right after adding, so the view switches to the
+new customer immediately.
+
+**Verification:** reproduced and confirmed fixed using Streamlit's
+`AppTest` tool (drives the script headlessly, no browser needed) -
+before the fix the selectbox stayed on index 0 after two adds; after the
+fix it correctly moved to index 1, then 2.
+
+### Fix: switching the active customer silently reverted
+
+**Symptom:** reported by the user - picking a different customer from
+the "Active customer" dropdown didn't change the pets/tasks shown; it
+stayed on whichever customer was already active.
+
+**Cause:** the selectbox had no explicit `key=`, and its `index=`
+argument was recomputed from `session_state.active_client_id` on every
+run. Streamlit partly derives an unkeyed widget's identity from its own
+arguments, so when `index=` changed (which it does every time the active
+customer changes), the widget looked "new" on the very next run and
+silently discarded the pick, falling back to `index=` - which, by
+construction, is always the *previously* active customer. The net effect:
+any attempt to switch customers got reverted on the following rerun.
+
+**Fix:** gave the selectbox a stable `key="active_client_select"`, so
+Streamlit treats it as the same widget across reruns and a pick actually
+sticks (the `index=` argument still sets its value the first time that
+key is ever seen, same as before).
+
+**Verification:** reproduced with `AppTest` - added a second customer, a
+pet for it, switched to the first customer (worked), then tried
+switching back to the second (reverted to the first, bug confirmed).
+After the fix, the same sequence correctly shows each customer's own
+pets both directions, with no exceptions.
+
+### Incident: debugging scripts clobbered the live persistence file
+
+**What happened:** while investigating the two fixes above (and an
+overlap-assignment report that turned out not to be reproducible - the
+fallback rule correctly avoided double-booking in every scenario tried),
+several `AppTest` reproduction scripts ran from the project's own working
+directory, so they read and wrote the *same* `business_data.json` the
+live Streamlit server (connected to the user's browser) was also
+continuously saving to. Some of those scripts started with `rm -f
+business_data.json` for a clean test fixture. Each run could overwrite or
+delete whatever the user's real live session had just saved, and a
+server restart soon after meant the next session loaded whatever the
+file happened to contain at that moment rather than the user's actual
+data - resulting in real data loss (not a bug in `storage.py` itself,
+which round-trips correctly in isolation per Step 6's verification).
+
+**Takeaway:** any future debugging/reproduction script must point at a
+separate file (not `business_data.json`) - e.g. pass an explicit `path`
+to `save_business`/`load_business`, or run from a scratch directory -
+never the same persistence file a live session depends on.
+
+### Fix: adding a customer stopped jumping to them (regression from the switching fix)
+
+**Symptom:** requested by the user - "Add pet" had no way to set the
+pet's age at creation, and separately, adding a new customer no longer
+switched the view to them (even though this had been fixed once
+already, in the previous entry above).
+
+**Cause of the regression:** the switching fix gave the "Active customer"
+selectbox a stable `key="active_client_select"`, which was the right fix
+for *that* bug - but it had a side effect nobody had tested yet: once a
+keyed widget has rendered once, Streamlit ignores its `index=`/`value=`
+argument on every later run. The Add Customer handler was still only
+setting `st.session_state.active_client_id` and relying on a freshly
+computed `index=default_index` to move the selectbox - which, after the
+switching fix, no longer had any effect. Fixing "switching reverts" and
+"adding doesn't jump to the new one" the way they'd each been fixed
+individually turned out to directly conflict.
+
+**Fix:**
+- `Pet` already had an `age: int = 0` field; the Add Pet form just never
+  exposed it. Added an "Age" `st.number_input` (default 0) alongside Pet
+  name and Species, passed through as `Pet(pet_name, species,
+  age=int(pet_age))`.
+- Reworked the active-customer mechanism to have one source of truth
+  instead of two competing ones: dropped `active_client_id` and the
+  `default_index`/`index=` computation entirely. The selectbox now has
+  no `index=` argument at all - its value is set only by directly writing
+  to `st.session_state.active_client_select` (seeded to `0` on the very
+  first run, set to `len(business.clients) - 1` by Add Customer, and
+  reset to `0` by Remove Customer and Start Over), which is the actually-
+  supported way to control a keyed widget's value from code.
+
+**Verification:** in an isolated `AppTest` session (pointed at a scratch
+JSON file, not `business_data.json`, per the incident above) - confirmed
+a pet added without touching the Age field gets `age == 0`; confirmed
+adding a second customer moves the selectbox to index 1; and confirmed
+switching to index 0 and back to index 1 afterward still works (guarding
+against reintroducing the earlier switching-reverts bug). All 14 tests
+still pass.
+
+---
+
+## Enhancement: pet-type matching for employees
+
+**Request:** workers should also have a "type of pet they can handle"
+skill, and dispatch should match a task's pet, not just its category,
+against that.
+
+**Domain model (`pawpal_system.py`):**
+- `Task` gained `pet_species: str = ""`, stamped automatically by
+  `Pet.add_task()`/`edit_task()` from the pet's own `species` - the same
+  denormalization already used for `pet_id`, so the dispatcher never
+  needs a separate pet lookup.
+- `Owner.edit_pet()` now also re-stamps `pet_species` on every one of
+  that pet's existing tasks when the species changes - without this, a
+  pet's already-created tasks would keep matching workers against its
+  *old* species after an edit.
+- `Worker` gained `pet_types: list[str] = field(default_factory=list)`
+  (empty = generalist/any pet, same convention as `skills`).
+- `Worker.is_qualified_for()` was split into two methods,
+  `is_skilled_for()` (category) and `is_suited_for()` (pet species), with
+  `is_qualified_for()` now just requiring both. The split exists so the
+  dispatcher's retry loop can tell the AI exactly which constraint it
+  violated - a worker right on skill but wrong on pet type is a different
+  problem from a worker wrong on skill, and lumping them into one vague
+  message would have crippled the AI's ability to self-correct.
+
+**Dispatcher (`dispatcher.py`):**
+- The LLM prompt now lists each task's `pet_species` and each worker's
+  `pet_types`, not just category/skills - the AI can't respect a
+  constraint it was never told about.
+- `_validate()` checks `is_skilled_for()` and `is_suited_for()`
+  separately, producing a distinct violation message for each.
+- `_fallback()` needed no change - it already calls
+  `worker.is_qualified_for()`, which now covers pet type automatically.
+
+**UI (`app.py`):**
+- Pulled the twice-duplicated `["dog", "cat", "other"]` list (Add/Edit
+  Pet) into one shared `SPECIES_OPTIONS` constant, same pattern as
+  `TASK_CATEGORIES`, and reused it for the new Employee fields.
+- Add/Edit Employee forms gained a "Pet types (none = any pet)"
+  multiselect; the Employees list display shows it too.
+
+**Persistence (`storage.py`):** `Worker.pet_types` and `Task.pet_species`
+are now saved/loaded, with `.get(..., default)` fallbacks so a
+`business_data.json` saved before this change still loads fine (no
+migration needed).
+
+**Tests:** 5 new tests - `Pet.add_task()` stamping species,
+`Owner.edit_pet()` re-stamping it on existing tasks, the three-way split
+between `is_skilled_for`/`is_suited_for`/`is_qualified_for`, a `_validate()`
+test confirming a pet-type mismatch gets its own message (not lumped in
+with a skill mismatch), and a `_fallback()` test confirming a
+wrong-species worker is skipped rather than assigned. All 19 tests
+(14 previous + 5 new) pass.
+
+**Documentation:** `README.md`'s Summary and Architectural Overview, and
+`diagrams/architecure_flow_finalproject.mmd`'s `CLIENT`/`STAFF`/`CHECK`
+node labels, updated to mention pet-type matching alongside skill
+matching.
+
+**Verification:** round-tripped through the actual UI with an isolated
+`AppTest` session (scratch file, not `business_data.json`) - added a cat
+pet with a walking task, added a dog-only-qualified employee, ran
+"Build & dispatch," and confirmed the task was correctly left unassigned
+rather than given to a worker who doesn't handle cats.
+
+### Side discovery while verifying: the default Gemini model had been deprecated
+
+That same verification run surfaced something unrelated but important:
+with the user's real `GEMINI_API_KEY` in place, every dispatch call was
+actually failing (silently falling back) because `DEFAULT_MODEL =
+"gemini-2.5-flash"` (set in Step 5) is no longer available - Google's API
+returned a 404 telling us to use `gemini-3.8-flash` instead. Updated
+`DEFAULT_MODEL` in `dispatcher.py` and the example in `.env.example`
+accordingly. Confirmed the fix really worked: the error changed from a
+permanent 404 (wrong model) to a transient 503 ("high demand, try again
+later") - a temporary capacity issue on Google's side, not a bug here -
+and the dispatcher's fallback guardrail produced a correct assignment
+either way, with no crash. Not re-tested further to avoid burning the
+user's API quota on a transient error; should succeed on a normal retry.
+
+---

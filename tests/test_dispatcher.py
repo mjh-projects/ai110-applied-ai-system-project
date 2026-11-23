@@ -209,3 +209,36 @@ def test_fallback_prefers_higher_priority_when_only_one_worker_fits():
 
     assert result.assignments[high.task.task_id] == sam.worker_id
     assert low.task.task_id in result.unassigned
+
+
+def test_validate_flags_wrong_pet_type_distinctly_from_skill():
+    # A worker right on skill but wrong on pet type must get its own
+    # message, separate from a skill mismatch - the retry loop can only
+    # fix what the feedback specifically names.
+    dog_task = Task("Morning walk", 30, Priority.HIGH, category="walking")
+    dog_task.pet_species = "dog"
+    walk_item = ScheduledTask(dog_task, time(7, 30), time(8, 0))
+
+    cat_only_walker = Worker("Robin", skills=["walking"], pet_types=["cat"])
+
+    plan = {dog_task.task_id: (cat_only_walker.worker_id, "wrong pet type")}
+    violations = Dispatcher()._validate(plan, [walk_item], [cat_only_walker])
+
+    assert any("doesn't handle" in v and "pet" in v for v in violations)
+    assert not any("not qualified" in v for v in violations)
+
+
+def test_fallback_skips_a_worker_with_the_wrong_pet_type():
+    dog_task = Task("Morning walk", 30, Priority.HIGH, category="walking")
+    dog_task.pet_species = "dog"
+    walk_item = ScheduledTask(dog_task, time(7, 30), time(8, 0))
+
+    cat_only_walker = Worker(
+        "Robin", skills=["walking"], pet_types=["cat"],
+        available_start=time(7, 0), available_end=time(12, 0),
+    )
+
+    result = Dispatcher()._fallback([walk_item], [cat_only_walker], DispatchResult())
+
+    assert dog_task.task_id in result.unassigned
+    assert dog_task.task_id not in result.assignments

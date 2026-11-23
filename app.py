@@ -1,20 +1,29 @@
 from datetime import date, time
 
+# ADDED (business pivot): dotenv + Dispatcher/Business/Worker replace the
+# single-Owner starter app's imports.
 import streamlit as st
 from dotenv import load_dotenv
 
 from dispatcher import Dispatcher
 from pawpal_system import Business, Owner, Pet, Priority, Task, Worker
+from storage import DEFAULT_PATH, load_business, save_business
 
-# Picks up GEMINI_API_KEY from a local .env file if one exists; does
-# nothing (not an error) when there isn't one, so the app still runs - the
-# Dispatcher's own fallback guardrail handles a genuinely missing key.
+# ADDED (business pivot): picks up GEMINI_API_KEY from a local .env file if
+# one exists; does nothing (not an error) when there isn't one, so the app
+# still runs - the Dispatcher's own fallback guardrail handles a genuinely
+# missing key.
 load_dotenv()
 
-# Shared vocabulary between a Task's category and a Worker's skills, so the
-# dispatcher can match them by exact string. A text field would let a typo
-# ("walkng") silently make every worker "unqualified".
+# ADDED (business pivot): shared vocabulary between a Task's category and a
+# Worker's skills, so the dispatcher can match them by exact string. A text
+# field would let a typo ("walkng") silently make every worker "unqualified".
 TASK_CATEGORIES = ["walking", "feeding", "meds", "grooming", "enrichment", "training", "other"]
+
+# ADDED (pet-type matching): one shared list for Pet.species and Worker.
+# pet_types, so "dog"/"cat"/"other" is defined once instead of duplicated
+# across the Add/Edit Pet forms and the new Add/Edit Employee forms.
+SPECIES_OPTIONS = ["dog", "cat", "other"]
 
 st.set_page_config(page_title="PawPal Company Scheduler", page_icon="🐾", layout="centered")
 
@@ -34,12 +43,23 @@ final plan is shown with the AI's reasoning.
 
 st.divider()
 
-# Business holds every customer (Owner) and employee (Worker). Streamlit
-# re-runs this whole file on every click, so it's kept in session_state -
-# without this check, every click would start over with an empty Business.
+# ADDED (business pivot): Business holds every customer (Owner) and
+# employee (Worker) in place of the starter app's single fixed Owner.
+# Streamlit re-runs this whole file on every click, so it's kept in
+# session_state - without this check, every click would start over with
+# an empty Business.
+#
+# ADDED (JSON persistence): loaded from disk on the very first run of a
+# session rather than always starting fresh, so customers/employees
+# survive a server restart or a new browser session. A missing or
+# corrupted file isn't fatal - it just means this is effectively a first
+# run, so fall back to a freshly seeded Business instead of crashing.
 if "business" not in st.session_state:
-    st.session_state.business = Business()
-    st.session_state.business.add_client(Owner("Jordan", "Smith"))
+    try:
+        st.session_state.business = load_business(DEFAULT_PATH)
+    except (FileNotFoundError, ValueError, KeyError):
+        st.session_state.business = Business()
+        st.session_state.business.add_client(Owner("Jordan", "Smith"))
 
 business = st.session_state.business
 
@@ -48,13 +68,16 @@ if st.button("Start over"):
     st.session_state.business.add_client(Owner("Jordan", "Smith"))
     st.session_state.editing_task = None
     st.session_state.editing_pet = None
+    # ADDED (business pivot): reset the employee-edit state and any saved
+    # dispatch result along with everything else.
     st.session_state.editing_worker = None
-    st.session_state.active_client_id = None
+    st.session_state.active_client_select = 0
     st.session_state.dispatch = None
     st.rerun()
 
 # ---------------------------------------------------------------------------
-# Customers
+# ADDED (business pivot): Customers - the starter app had one fixed Owner
+# with inline name fields; a business can have any number of customers.
 # ---------------------------------------------------------------------------
 st.subheader("Customers")
 
@@ -68,26 +91,39 @@ with col_add_btn:
     st.write("")
     if st.button("Add customer") and (new_client_first or new_client_last):
         business.add_client(Owner(new_client_first, new_client_last))
+        # FIXED: setting the selectbox's own keyed state directly (not an
+        # `index=` argument, which a keyed widget ignores after its first
+        # render - see the note on the selectbox below) is what actually
+        # moves the view to the customer just added.
+        st.session_state.active_client_select = len(business.clients) - 1
         st.rerun()
 
 if not business.clients:
     st.info("No customers yet. Add one above.")
     st.stop()
 
-# `active_client_id` remembers which customer's pets/tasks are shown below,
-# across reruns triggered by unrelated buttons elsewhere on the page.
-default_client_id = st.session_state.get("active_client_id") or business.clients[0].client_id
-default_index = next(
-    (i for i, c in enumerate(business.clients) if c.client_id == default_client_id), 0
-)
+# ADDED (business pivot): seed the selectbox's own state only on the very
+# first run ever - after that, its `key` below is the single source of
+# truth for which customer is active, across reruns and across clicks
+# elsewhere on the page.
+if "active_client_select" not in st.session_state:
+    st.session_state.active_client_select = 0
+
 client_index = st.selectbox(
     "Active customer",
     range(len(business.clients)),
-    index=default_index,
     format_func=lambda i: business.clients[i].full_name(),
+    # FIXED: no `index=` argument here on purpose. A keyed widget ignores
+    # `index=`/`value=` after its first-ever render, so a previous version
+    # of this code that passed a freshly-computed `index=` every run had
+    # no effect once the key existed - any attempt to jump the selection
+    # (e.g. to a newly added customer) silently failed. Writing directly
+    # to `st.session_state.active_client_select` (as done above and in the
+    # Add/Remove/Start Over handlers) is the actual supported way to set a
+    # keyed widget's value from code.
+    key="active_client_select",
 )
 client = business.clients[client_index]
-st.session_state.active_client_id = client.client_id
 
 col_cfirst, col_clast = st.columns(2)
 with col_cfirst:
@@ -99,6 +135,9 @@ with col_clast:
         "Last name", value=client.last_name, key=f"clast_{client.client_id}"
     )
 
+# ADDED (business pivot): day_start/daily_minutes used to be typed into
+# the scheduler form on every run; now they're stored per-customer so
+# Business.generate_daily_tasks() can plan every customer at once.
 col_cstart, col_cminutes, col_cremove = st.columns([1.5, 1.5, 1])
 with col_cstart:
     client.day_start = st.time_input(
@@ -119,7 +158,7 @@ with col_cremove:
     st.write("")
     if st.button("Remove customer", key=f"cremove_{client.client_id}"):
         business.remove_client(client.client_id)
-        st.session_state.active_client_id = None
+        st.session_state.active_client_select = 0
         st.rerun()
 
 st.divider()
@@ -129,14 +168,18 @@ st.divider()
 # ---------------------------------------------------------------------------
 st.markdown(f"### {client.full_name()}'s Pets")
 
-col_pet, col_species = st.columns(2)
+col_pet, col_species, col_pet_age = st.columns(3)
 with col_pet:
     pet_name = st.text_input("Pet name", value="Mochi")
 with col_species:
-    species = st.selectbox("Species", ["dog", "cat", "other"])
+    species = st.selectbox("Species", SPECIES_OPTIONS)
+with col_pet_age:
+    # ADDED: Age already existed on Pet with a default of 0, but this form
+    # never let anyone set it at creation - only later, via Edit pet.
+    pet_age = st.number_input("Age", min_value=0, max_value=40, value=0)
 
 if st.button("Add pet"):
-    client.add_pet(Pet(pet_name, species))
+    client.add_pet(Pet(pet_name, species, age=int(pet_age)))
     st.rerun()
 
 if client.pets:
@@ -165,14 +208,13 @@ if editing_pet is not None:
     new_pet_name = st.text_input("Pet name", value=editing_pet.name, key=f"pname_{pkey}")
     col_sp, col_age = st.columns(2)
     with col_sp:
-        species_options = ["dog", "cat", "other"]
         sp_index = (
-            species_options.index(editing_pet.species)
-            if editing_pet.species in species_options
+            SPECIES_OPTIONS.index(editing_pet.species)
+            if editing_pet.species in SPECIES_OPTIONS
             else 2
         )
         new_species = st.selectbox(
-            "Species", species_options, index=sp_index, key=f"pspecies_{pkey}"
+            "Species", SPECIES_OPTIONS, index=sp_index, key=f"pspecies_{pkey}"
         )
     with col_age:
         new_age = st.number_input(
@@ -205,6 +247,9 @@ if client.pets:
     with col3:
         priority = st.selectbox("Priority", ["low", "medium", "high"], index=2)
 
+    # ADDED (business pivot): Category existed on Task already but the
+    # starter UI never set it. A Worker's skills are matched against it,
+    # so without this field no worker could ever be "qualified" for a task.
     col4, col5, col6 = st.columns(3)
     with col4:
         category = st.selectbox("Category", TASK_CATEGORIES)
@@ -277,6 +322,8 @@ if editing is not None:
             "Repeats", freqs,
             index=freqs.index(editing.frequency), key=f"freq_{key}",
         )
+    # ADDED (business pivot): same reasoning as the Category field on the
+    # Add Task form above.
     new_category = st.selectbox(
         "Category",
         TASK_CATEGORIES,
@@ -316,17 +363,23 @@ if editing is not None:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Employees
+# ADDED (business pivot): Employees - the starter app had no concept of
+# staff at all, since the owner did every task themselves.
 # ---------------------------------------------------------------------------
 st.subheader("Employees")
 st.caption("Staff who will be assigned pet-care tasks by the dispatcher.")
 
-col_wname, col_wskills = st.columns([1.5, 2.5])
+col_wname, col_wskills, col_wpets = st.columns([1.3, 2, 1.7])
 with col_wname:
     worker_name = st.text_input("Employee name", value="", key="new_worker_name")
 with col_wskills:
     worker_skills = st.multiselect(
         "Skills (none selected = can do any task)", TASK_CATEGORIES, key="new_worker_skills"
+    )
+with col_wpets:
+    # ADDED (pet-type matching): which species this worker can handle.
+    worker_pet_types = st.multiselect(
+        "Pet types (none = any pet)", SPECIES_OPTIONS, key="new_worker_pet_types"
     )
 
 col_wstart, col_wend, col_wcap = st.columns(3)
@@ -344,6 +397,7 @@ if st.button("Add employee") and worker_name:
         Worker(
             worker_name,
             skills=list(worker_skills),
+            pet_types=list(worker_pet_types),
             available_start=worker_start,
             available_end=worker_end,
             max_minutes_per_day=int(worker_cap),
@@ -356,8 +410,9 @@ if business.workers:
     for worker in business.workers:
         col_info, col_edit, col_remove = st.columns([4, 1.2, 1.4])
         skills_text = ", ".join(worker.skills) if worker.skills else "any task"
+        pets_text = ", ".join(worker.pet_types) if worker.pet_types else "any pet"
         col_info.write(
-            f"**{worker.name}** - {skills_text} - "
+            f"**{worker.name}** - {skills_text} - {pets_text} - "
             f"{worker.available_start:%H:%M}-{worker.available_end:%H:%M}, "
             f"max {worker.max_minutes_per_day} min/day"
         )
@@ -384,6 +439,12 @@ if editing_worker is not None:
         default=editing_worker.skills,
         key=f"wskills_{wkey}",
     )
+    new_worker_pet_types = st.multiselect(
+        "Pet types (none = any pet)",
+        SPECIES_OPTIONS,
+        default=editing_worker.pet_types,
+        key=f"wpets_{wkey}",
+    )
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         new_worker_start = st.time_input(
@@ -398,10 +459,14 @@ if editing_worker is not None:
             "Max minutes/day", min_value=1, max_value=1440,
             value=editing_worker.max_minutes_per_day, key=f"wcap_{wkey}",
         )
+    # ADDED (business pivot): fields are mutated in place here rather than
+    # swapped like Pet.edit_task does, since nothing else holds a
+    # reference to a Worker that needs its identity preserved.
     col_save, col_cancel = st.columns(2)
     if col_save.button("Save employee"):
         editing_worker.name = new_worker_name
         editing_worker.skills = list(new_worker_skills)
+        editing_worker.pet_types = list(new_worker_pet_types)
         editing_worker.available_start = new_worker_start
         editing_worker.available_end = new_worker_end
         editing_worker.max_minutes_per_day = int(new_worker_cap)
@@ -414,7 +479,9 @@ if editing_worker is not None:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Dispatch: build every customer's plan, then let the AI assign employees.
+# ADDED (business pivot): Dispatch replaces the starter app's "Build
+# Schedule" button. It still builds each customer's plan the same way,
+# then adds the new step: an AI-assisted Dispatcher decides who does it.
 # ---------------------------------------------------------------------------
 st.subheader("Dispatch Today's Schedule")
 st.caption(
@@ -425,12 +492,14 @@ st.caption(
 
 if st.button("Build & dispatch today's schedule"):
     today = date.today()
-    # Business.generate_daily_tasks() is pure scheduling logic (no AI); it
-    # also saves each customer's own Schedule so get_schedule() keeps working.
+    # ADDED (business pivot): Business.generate_daily_tasks() is pure
+    # scheduling logic (no AI); it also saves each customer's own Schedule
+    # so get_schedule() keeps working.
     pooled = business.generate_daily_tasks(today)
+    # ADDED (business pivot): the agentic step - Dispatcher.dispatch()
+    # returns data only; writing the chosen worker onto each ScheduledTask
+    # here keeps the dispatcher itself free of domain mutation.
     result = Dispatcher().dispatch(pooled, business.workers)
-    # dispatcher.py returns data only; writing the chosen worker onto each
-    # ScheduledTask here keeps the dispatcher itself free of domain mutation.
     for item in pooled:
         item.assigned_worker_id = result.assignments.get(item.task.task_id, "")
     st.session_state.dispatch = {"date": today, "pooled": pooled, "result": result}
@@ -536,3 +605,10 @@ if dispatch_state and dispatch_state["date"] == date.today():
                     st.text(f"{item.title}: {reason}")
 else:
     st.info('Click "Build & dispatch today\'s schedule" to generate today\'s plan.')
+
+# ADDED (JSON persistence): Streamlit re-runs this whole script on every
+# interaction, so saving once here - after any add/edit/remove above has
+# already happened to `business` this run - keeps business_data.json
+# continuously in sync with session_state, with no separate "Save" button
+# and no per-action save calls scattered through the file above.
+save_business(business, DEFAULT_PATH)

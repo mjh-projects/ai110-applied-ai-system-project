@@ -5,3 +5,5 @@ __pycache__/
 .DS_Store
 dispatch.log
 .env
+business_data.json
+business_data.json.tmp

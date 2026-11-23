@@ -49,7 +49,7 @@ class DispatchResult:
     log: list[str] = field(default_factory=list)  # human-readable trace for the UI
 
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
 
 
 class Dispatcher:
@@ -168,6 +168,7 @@ class Dispatcher:
             task = st.task
             task_lines.append(
                 f"- id={task.task_id} title={task.title!r} category={task.category!r} "
+                f"pet_species={task.pet_species!r} "
                 f"start={st.start_time:%H:%M} end={st.end_time:%H:%M} "
                 f"duration_minutes={task.duration_minutes}"
             )
@@ -175,8 +176,10 @@ class Dispatcher:
         worker_lines = []
         for worker in workers:
             skills = ", ".join(worker.skills) if worker.skills else "any (generalist)"
+            pet_types = ", ".join(worker.pet_types) if worker.pet_types else "any pet"
             worker_lines.append(
                 f"- id={worker.worker_id} name={worker.name!r} skills=[{skills}] "
+                f"pet_types=[{pet_types}] "
                 f"hours={worker.available_start:%H:%M}-{worker.available_end:%H:%M} "
                 f"max_minutes_per_day={worker.max_minutes_per_day}"
             )
@@ -186,9 +189,10 @@ class Dispatcher:
             "below to one qualified, available worker.\n\n"
             "Tasks:\n" + "\n".join(task_lines) + "\n\n"
             "Workers:\n" + "\n".join(worker_lines) + "\n\n"
-            "Rules: a worker's skills list must include the task's category, unless "
-            "the worker is a generalist. The task's start/end time must fall inside "
-            "the worker's hours. A worker cannot be assigned two tasks that overlap "
+            "Rules: a worker's skills list must include the task's category, and their "
+            "pet_types list must include the task's pet_species, unless the worker is a "
+            "generalist on that list. The task's start/end time must fall inside the "
+            "worker's hours. A worker cannot be assigned two tasks that overlap "
             "in time, and a worker's total assigned minutes cannot exceed their "
             "max_minutes_per_day. It is fine to leave a task unassigned if no worker "
             "fits.\n\n"
@@ -253,10 +257,19 @@ class Dispatcher:
             st = tasks_by_id[task_id]
             worker = workers_by_id[worker_id]
 
-            if not worker.is_qualified_for(st.task):
+            # ADDED (pet-type matching): checked separately from the skill
+            # check, not via is_qualified_for(), so a skill mismatch and a
+            # pet-type mismatch each get their own specific message - the
+            # retry loop can only fix what the feedback actually names.
+            if not worker.is_skilled_for(st.task):
                 violations.append(
                     f"worker {worker.name!r} is not qualified for task {st.task.title!r} "
                     f"(category {st.task.category!r})"
+                )
+            if not worker.is_suited_for(st.task):
+                violations.append(
+                    f"worker {worker.name!r} doesn't handle task {st.task.title!r}'s pet "
+                    f"species ({st.task.pet_species!r})"
                 )
             if not worker.is_available_for(st.start_time, st.end_time):
                 violations.append(
