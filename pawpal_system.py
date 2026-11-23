@@ -195,6 +195,11 @@ class ScheduledTask:
     # still lives here, not on the shared Task, so checking off today's walk
     # doesn't mark every future walk done. New items begin as PENDING.
     status: Status = Status.PENDING
+    # ADDED (business pivot): which Worker is doing this task, set by the
+    # Dispatcher once it assigns one. Empty string means "not yet assigned" -
+    # kept as a plain field (not Optional[Worker]) so ScheduledTask still
+    # doesn't need to import Worker or hold a second object reference.
+    assigned_worker_id: str = ""
 
     # CHANGE: read-only shortcuts that forward to the wrapped Task. The Task
     # stays the single source of truth for what the activity is; these just
@@ -371,12 +376,21 @@ class Schedule:
 
 @dataclass
 class Owner:
-    """A pet owner who has pets and at most one schedule per day."""
+    """A client of the care business: has pets and at most one schedule per day."""
 
     first_name: str
     last_name: str
     pets: list[Pet] = field(default_factory=list)
     schedules: list[Schedule] = field(default_factory=list)
+    # ADDED (business pivot): a client no longer performs tasks themselves,
+    # but still sets the day's time window the business plans their pets'
+    # tasks within (previously typed into the UI on every run). Defaults
+    # keep existing `Owner(first, last)` call sites (main.py, tests) working.
+    day_start: time = time(7, 0)
+    daily_minutes: int = 90
+    # ADDED: a stable id so a Business can hold a *list* of clients and look
+    # one up or remove it, the same reasoning as Pet.pet_id (names repeat).
+    client_id: str = field(default_factory=_new_id)
 
     def full_name(self) -> str:
         """Return the owner's first and last name as one string."""
@@ -565,3 +579,79 @@ class Scheduler:
         # the shorter task comes first. sorted() returns a new list and
         # leaves the caller's list unchanged.
         return sorted(tasks, key=lambda t: (-t.priority_value(), t.duration_minutes))
+
+
+# ADDED (business pivot): a Worker is staff, not a client. A Task's
+# `category` (e.g. "walking", "meds") is matched against a worker's
+# `skills` to decide who is qualified to do it.
+@dataclass
+class Worker:
+    """A staff member who can be assigned care tasks for clients' pets."""
+
+    name: str
+    # Empty list means "generalist": qualified for every category, so a
+    # one-person business can add a worker without configuring skills.
+    skills: list[str] = field(default_factory=list)
+    available_start: time = time(8, 0)
+    available_end: time = time(18, 0)
+    max_minutes_per_day: int = 480
+    worker_id: str = field(default_factory=_new_id)
+
+    def is_qualified_for(self, task: Task) -> bool:
+        """Return True if this worker can perform `task`'s category."""
+        return not self.skills or task.category in self.skills
+
+    def is_available_for(self, start: time, end: time) -> bool:
+        """Return True if the [start, end) window falls inside this worker's hours."""
+        return self.available_start <= start and end <= self.available_end
+
+
+@dataclass
+class Business:
+    """A pet-care company: its worker roster and the clients it serves."""
+
+    name: str = "PawPal Company Scheduler"
+    workers: list[Worker] = field(default_factory=list)
+    clients: list[Owner] = field(default_factory=list)
+
+    def add_worker(self, worker: Worker) -> None:
+        """Add a worker to the roster."""
+        self.workers.append(worker)
+
+    def remove_worker(self, worker_id: str) -> None:
+        """Remove the worker with the given id, or raise ValueError if missing."""
+        for i, worker in enumerate(self.workers):
+            if worker.worker_id == worker_id:
+                del self.workers[i]
+                return
+        raise ValueError(f"No worker with id {worker_id!r}")
+
+    def add_client(self, client: Owner) -> None:
+        """Add a client (pet owner) to the business."""
+        self.clients.append(client)
+
+    def remove_client(self, client_id: str) -> None:
+        """Remove the client with the given id, or raise ValueError if missing."""
+        for i, client in enumerate(self.clients):
+            if client.client_id == client_id:
+                del self.clients[i]
+                return
+        raise ValueError(f"No client with id {client_id!r}")
+
+    def generate_daily_tasks(self, on: date) -> list[ScheduledTask]:
+        """Build each client's per-day Schedule and return every scheduled task, pooled.
+
+        This is the deterministic half of dispatch: it decides WHAT needs to
+        happen and WHEN (reusing Scheduler, unchanged), but not WHO does it.
+        The AI Dispatcher (dispatcher.py) assigns workers afterward, so this
+        method takes no dispatcher and has no AI dependency - it works the
+        same with zero workers on the roster.
+        """
+        pooled: list[ScheduledTask] = []
+        for client in self.clients:
+            plan = Scheduler().generate_plan(
+                client, on, client.day_start, client.daily_minutes
+            )
+            client.set_schedule(plan)
+            pooled.extend(plan.scheduled)
+        return pooled
