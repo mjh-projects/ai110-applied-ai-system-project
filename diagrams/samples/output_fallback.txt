@@ -1,0 +1,11 @@
+PawPal Company Scheduler - dispatch demo for 2026-11-22
+============================================================
+2 task(s) scheduled; assigned by the fallback rule in 1 attempt(s).
+
+08:00-08:30  Morning walk    -> Sam
+    reason: Assigned by fallback rule: first qualified, available worker.
+08:00-08:20  Grooming        -> Robin
+    reason: Assigned by fallback rule: first qualified, available worker.
+
+Dispatch log:
+  - Attempt 1: AI planning failed (GEMINI_API_KEY is not set); using fallback rule.

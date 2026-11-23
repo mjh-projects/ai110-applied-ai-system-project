@@ -1,0 +1,14 @@
+PawPal Company Scheduler - agentic retry demo
+============================================================
+Input: 2 tasks, 2 workers. Attempt 1's scripted plan deliberately assigns
+the dog walk to Robin, who only handles cats and grooming.
+
+Result: accepted on attempt 2 (AI plan accepted).
+
+Dispatch log:
+  - Attempt 1: 2 violation(s) found; retrying.
+  - Attempt 2: valid plan accepted.
+
+Final assignments:
+  Morning walk -> Sam (Sam handles dog walks)
+  Nail trim -> Robin (Robin does grooming)
