@@ -1,0 +1,43 @@
+flowchart TD
+    subgraph INPUT["Input"]
+        CLIENT["Customer and pet data: tasks with duration, priority, category"]
+        STAFF["Employee roster: skills, hours, daily capacity"]
+    end
+
+    CLIENT --> SCHED["Scheduler (deterministic): decides which tasks are due today and when"]
+    SCHED --> POOL["Day's scheduled tasks: time-slotted, not yet assigned to anyone"]
+
+    subgraph AGENT["Dispatcher Agent"]
+        PLAN["Planner (LLM): proposes task-to-worker assignments"]
+        CHECK["Evaluator (deterministic): checks skill match, hours, overlaps, capacity"]
+        RETRY{"Valid?"}
+        FALLBACK["Fallback rule: deterministic greedy assignment"]
+    end
+
+    POOL --> PLAN
+    STAFF --> PLAN
+    PLAN --> CHECK
+    CHECK --> RETRY
+    RETRY -- "no, retries left" --> PLAN
+    RETRY -- "no, retries exhausted" --> FALLBACK
+
+    OUTPUT["Final dispatch plan: who does what, when, and why"]
+    RETRY -- "yes" --> OUTPUT
+    FALLBACK --> OUTPUT
+
+    OUTPUT --> LOG["Logger: records attempts, violations, fallback events"]
+    OUTPUT --> UI["Streamlit UI: shows assignments plus the AI's stated reasoning"]
+
+    subgraph HUMAN["Human in the loop"]
+        REVIEW["Business staff review the dispatch"]
+        ACT["Mark tasks Done or Skipped; can override an assignment"]
+    end
+
+    UI --> REVIEW --> ACT
+
+    subgraph TEST["Automated testing"]
+        MOCK["tests/test_dispatcher.py: mocked LLM, deliberately invalid plans"]
+    end
+
+    MOCK -.verifies.-> CHECK
+    MOCK -.verifies.-> FALLBACK
